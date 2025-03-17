@@ -1,0 +1,456 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using Firebase;
+using Firebase.Auth;
+using Firebase.Database;
+using TMPro;
+using System.Linq;
+using System.Threading.Tasks;
+using UnityEngine.SceneManagement;
+public class FirebaseManager : MonoBehaviour
+{
+    //Firebase variables
+    [Header("Firebase")]
+    public DependencyStatus dependencyStatus;
+    public FirebaseAuth auth;    
+    public FirebaseUser User;
+    public DatabaseReference DBreference;
+
+    //Login variables
+    [Header("Login")]
+    public TMP_InputField emailLoginField;
+    public TMP_InputField passwordLoginField;
+    public TMP_Text warningLoginText;
+    public TMP_Text confirmLoginText;
+
+    //Register variables
+    [Header("Register")]
+    public TMP_InputField usernameRegisterField;
+    public TMP_InputField emailRegisterField;
+    public TMP_InputField passwordRegisterField;
+    public TMP_InputField passwordRegisterVerifyField;
+    public TMP_Text warningRegisterText;
+        
+    public GameObject scoreElement;
+   
+    
+    public Transform scoreboardContent;
+    void Awake()
+    {
+        FirebaseApp.CheckAndFixDependenciesAsync().ContinueWith(task =>
+        {
+            dependencyStatus = task.Result;
+            if (dependencyStatus == DependencyStatus.Available)
+            {
+             
+                Debug.Log("✅ Firebase is connected in Build!");
+                InitializeFirebase();
+
+                // Load scoreboard automatically if in scoreboard scene
+                if (SceneManager.GetActiveScene().name == "ScoreboardScene")
+                {
+                    StartCoroutine(LoadScoreboardData());
+                }
+            }
+            else
+            {
+                Debug.LogError("Could not resolve all Firebase dependencies: " + dependencyStatus);
+            }
+        });
+    }
+    private void InitializeFirebase()
+    {
+        Debug.Log("Setting up Firebase Auth");
+        //Set the authentication instance object
+        auth = FirebaseAuth.DefaultInstance;
+        DBreference = FirebaseDatabase.DefaultInstance.RootReference;
+        if (auth == null)
+        {
+            Debug.LogError("❌ Firebase Auth failed to initialize!");
+        }
+    }
+
+ 
+
+    
+    public void ClearLoginFeilds()
+    {
+        emailLoginField.text = "";
+        passwordLoginField.text = "";
+    }
+    public void ClearRegisterFeilds()
+    {
+        usernameRegisterField.text = "";
+        emailRegisterField.text = "";
+        passwordRegisterField.text = "";
+        passwordRegisterVerifyField.text = "";
+    }
+
+    //Function for the login button
+    public void LoginButton()
+    {
+        //Call the login coroutine passing the email and password
+        StartCoroutine(Login(emailLoginField.text, passwordLoginField.text));
+    }
+    //Function for the register button
+    public void RegisterButton()
+    {
+        //Call the register coroutine passing the email, password, and username
+        
+        StartCoroutine(Register(emailRegisterField.text, passwordRegisterField.text, usernameRegisterField.text));
+    }
+    //Function for the sign out button
+    public void GuestLoginButton()
+    {
+        StartCoroutine(GuestLogin());
+    }
+    
+
+    void OnEnable()
+    {
+        SceneManager.sceneLoaded += OnSceneLoaded;
+    }
+
+    void OnDisable()
+    {
+        SceneManager.sceneLoaded -= OnSceneLoaded;
+    }
+
+    void OnSceneLoaded(Scene scene, LoadSceneMode mode)
+    {
+        if (scene.name == "Board")
+        {
+            StartCoroutine(LoadScoreboardData());
+        }
+    }
+
+   
+    private IEnumerator Login(string _email, string _password)
+    {
+        //Call the Firebase auth signin function passing the email and password
+        Task<AuthResult> LoginTask = auth.SignInWithEmailAndPasswordAsync(_email, _password);
+        //Wait until the task completes
+        yield return new WaitUntil(predicate: () => LoginTask.IsCompleted);
+
+        if (LoginTask.Exception != null)
+        {
+            //If there are errors handle them
+            Debug.LogWarning(message: $"Failed to register task with {LoginTask.Exception}");
+            FirebaseException firebaseEx = LoginTask.Exception.GetBaseException() as FirebaseException;
+            AuthError errorCode = (AuthError)firebaseEx.ErrorCode;
+
+            string message = "Login Failed!";
+            switch (errorCode)
+            {
+                case AuthError.MissingEmail:
+                    message = "Missing Email";
+                    break;
+                case AuthError.MissingPassword:
+                    message = "Missing Password";
+                    break;
+                case AuthError.WrongPassword:
+                    message = "Wrong Password";
+                    break;
+                case AuthError.InvalidEmail:
+                    message = "Invalid Email";
+                    break;
+                case AuthError.UserNotFound:
+                    message = "Account does not exist";
+                    break;
+            }
+            warningLoginText.text = message;
+        }
+        else
+        {
+            //User is now logged in
+            //Now get the result
+            User = LoginTask.Result.User;
+            Debug.LogFormat("User signed in successfully: {0} ({1})", User.DisplayName, User.Email);
+            warningLoginText.text = "";
+            confirmLoginText.text = "Logged In";
+            yield return StartCoroutine(LoadUserData());
+
+
+            yield return new WaitForSeconds(2);
+            SceneManager.LoadScene("MainMenu");
+
+            //usernameField.text = User.DisplayName;UIManager.instance.UserDataScreen();
+            //// Change to user data
+            ///UIconfirmLoginText.text = "";ClearLoginFeilds();ClearRegisterFeilds();
+        }
+    }
+    // Function to allow users to log in as a Guest (Anonymous Sign-In)
+   private IEnumerator GuestLogin()
+{
+    if (auth == null)
+    {
+        Debug.LogError("❌ Firebase Auth is not initialized!");
+        warningLoginText.text = "Authentication service not available.";
+        yield break;
+    }
+
+    // 🔥 Start Guest Login
+    Task<AuthResult> loginTask = auth.SignInAnonymouslyAsync();
+    yield return new WaitUntil(() => loginTask.IsCompleted);
+
+    if (loginTask.Exception != null)
+    {
+        Debug.LogError($"❌ Guest login failed: {loginTask.Exception}");
+        warningLoginText.text = "Guest login failed. Try again.";
+        yield break;
+    }
+
+    // ✅ Guest Login Successful
+    User = auth.CurrentUser;
+    if (User != null && User.IsAnonymous)
+    {
+        Debug.Log($"✅ Guest logged in: {User.UserId} (Anonymous: {User.IsAnonymous})");
+        warningLoginText.text = "";
+        confirmLoginText.text = "Logged in as Guest!";
+
+        // ✅ Generate and save username, THEN load scene
+        yield return StartCoroutine(GenerateGuestUsernameAndProceed(User.UserId));
+    }
+    else
+    {
+        Debug.LogError("❌ Guest login failed: User object is null");
+        warningLoginText.text = "Guest login failed.";
+        yield break;
+    }
+}
+
+// ✅ Generates Guest Username, Saves to Firebase, THEN Loads Scene
+private IEnumerator GenerateGuestUsernameAndProceed(string userId)
+{
+    Task<DataSnapshot> DBTask = DBreference.Child("users").GetValueAsync();
+    yield return new WaitUntil(() => DBTask.IsCompleted);
+
+    if (DBTask.Exception != null)
+    {
+        Debug.LogWarning($"⚠️ Failed to retrieve guest count: {DBTask.Exception}");
+        yield break;
+    }
+
+    // ✅ Convert long to int safely
+    DataSnapshot snapshot = DBTask.Result;
+    int guestCount = (int)snapshot.ChildrenCount + 1;
+
+    string guestUsername = "Player" + guestCount;
+    Debug.Log($"🎮 Assigning Guest Username: {guestUsername}");
+
+    // ✅ Save guest data & wait before switching scenes
+    yield return StartCoroutine(SaveGuestData(userId, guestUsername));
+
+    // ✅ Load main menu ONLY after saving guest data
+    Debug.Log("🔄 Switching to MainMenu...");
+    SceneManager.LoadScene("MainMenu");
+}
+
+// ✅ Saves guest data to Firebase before switching scene
+private IEnumerator SaveGuestData(string userId, string guestUsername)
+{
+    Dictionary<string, object> userData = new Dictionary<string, object>
+    {
+        { "username", guestUsername },
+        { "scores", 0 } // Default score for new guests
+    };
+
+    Task setUserTask = DBreference.Child("users").Child(userId).SetValueAsync(userData);
+    yield return new WaitUntil(() => setUserTask.IsCompleted);
+
+    if (setUserTask.Exception != null)
+    {
+        Debug.LogError($"❌ Failed to save guest data: {setUserTask.Exception}");
+    }
+    else
+    {
+        Debug.Log($"✅ Guest data saved successfully: {guestUsername}");
+    }
+}
+
+       
+
+// Coroutine to load the game scene after login
+   
+
+    private IEnumerator Register(string _email, string _password, string _username)
+    {
+        if (_username == "")
+        {
+            //If the username field is blank show a warning
+            warningRegisterText.text = "Missing Username";
+        }
+        else if(passwordRegisterField.text != passwordRegisterVerifyField.text)
+        {
+            //If the password does not match show a warning
+            warningRegisterText.text = "Password Does Not Match!";
+        }
+        else 
+        {
+            //Call the Firebase auth signin function passing the email and password
+            Task<AuthResult> RegisterTask = auth.CreateUserWithEmailAndPasswordAsync(_email, _password);
+            //Wait until the task completes
+            yield return new WaitUntil(predicate: () => RegisterTask.IsCompleted);
+
+            if (RegisterTask.Exception != null)
+            {
+                //If there are errors handle them
+                Debug.LogWarning(message: $"Failed to register task with {RegisterTask.Exception}");
+                FirebaseException firebaseEx = RegisterTask.Exception.GetBaseException() as FirebaseException;
+                AuthError errorCode = (AuthError)firebaseEx.ErrorCode;
+
+                string message = "Register Failed!";
+                switch (errorCode)
+                {
+                    case AuthError.MissingEmail:
+                        message = "Missing Email";
+                        break;
+                    case AuthError.MissingPassword:
+                        message = "Missing Password";
+                        break;
+                    case AuthError.WeakPassword:
+                        message = "Weak Password";
+                        break;
+                    case AuthError.EmailAlreadyInUse:
+                        message = "Email Already In Use";
+                        break;
+                }
+                warningRegisterText.text = message;
+            }
+            else
+            {
+                //User has now been created
+                //Now get the result
+                User = RegisterTask.Result.User;
+
+                if (User != null)
+                {
+                    //Create a user profile and set the username
+                    UserProfile profile = new UserProfile{DisplayName = _username};
+
+                    //Call the Firebase auth update user profile function passing the profile with the username
+                    Task ProfileTask = User.UpdateUserProfileAsync(profile);
+                    //Wait until the task completes
+                    yield return new WaitUntil(predicate: () => ProfileTask.IsCompleted);
+
+                    if (ProfileTask.Exception != null)
+                    {
+                        //If there are errors handle them
+                        Debug.LogWarning(message: $"Failed to register task with {ProfileTask.Exception}");
+                        warningRegisterText.text = "Username Set Failed!";
+                        Debug.LogWarning($"Failed to set username: {ProfileTask.Exception}");
+                        warningRegisterText.text = "Username Set Failed!";
+                    }
+                    else
+                    {
+                        //Username is now set
+                        //Now return to login screen
+                        warningRegisterText.text = "";
+                        Debug.Log("✅ Registration successful!");
+                        confirmLoginText.text = "Registration Successful! You can now log in."; warningRegisterText.text = "";
+                        Debug.Log("✅ Registration successful!");
+                        confirmLoginText.text = "Registration Successful! You can now log in.";
+                        //UIManager.instance.LoginScreen();                        
+                        warningRegisterText.text = "";
+                        ClearRegisterFeilds();
+                        ClearLoginFeilds();
+                    }
+                }
+            }
+        }
+    }
+
+  
+
+    private IEnumerator LoadUserData()
+    {
+        // Check if user is logged in
+        if (User == null)
+        {
+            Debug.LogWarning("LoadUserData called, but no user is logged in!");
+            yield break; // Stop execution if no user
+        }
+
+        // Get the currently logged-in user's data from Firebase
+        Task<DataSnapshot> DBTask = DBreference.Child("users").Child(User.UserId).GetValueAsync();
+
+        yield return new WaitUntil(() => DBTask.IsCompleted);
+
+        if (DBTask.Exception != null)
+        {
+            Debug.LogWarning($"Failed to load user data: {DBTask.Exception}");
+            yield break;
+        }
+
+        DataSnapshot snapshot = DBTask.Result;
+
+        if (snapshot.Value == null)
+        {
+            Debug.Log("No user data found, setting default values.");
+            // Example: Set default values if user has no data
+            // rewardField.text = "0";
+        }
+        else
+        {
+            Debug.Log("User data loaded successfully.");
+
+            // Ensure "reward" exists before accessing it
+         
+        }
+    }
+    private IEnumerator LoadScoreboardData()
+{
+    Task<DataSnapshot> DBTask = DBreference.Child("users").OrderByChild("scores").GetValueAsync();
+    yield return new WaitUntil(() => DBTask.IsCompleted);
+
+    if (DBTask.Exception != null)
+    {
+        Debug.LogWarning($"Failed to load scoreboard: {DBTask.Exception}");
+        yield break;
+    }
+
+    DataSnapshot snapshot = DBTask.Result;
+
+    // Clear existing elements before populating
+    foreach (Transform child in scoreboardContent)
+    {
+        Destroy(child.gameObject);
+    }
+
+    if (scoreElement == null)
+    {
+        Debug.LogError("❌ scoreElement prefab is missing!");
+        yield break;
+    }
+
+    List<DataSnapshot> sortedUsers = snapshot.Children.ToList();
+    sortedUsers.Reverse(); // Show highest score first
+
+    int rank = 1;
+    int guestCount = 1; // Start counting guest users
+
+    // First, check how many "PlayerXX" exist already
+   
+    foreach (DataSnapshot childSnapshot in sortedUsers.Take(10))
+    {
+        if (!childSnapshot.HasChild("username") || !childSnapshot.HasChild("scores"))
+            continue;
+
+        string username = childSnapshot.Child("username").Value.ToString();
+    
+        // ✅ Correct way to convert from long → int
+        int score = Convert.ToInt32(childSnapshot.Child("scores").Value);
+
+        Debug.Log($"🏆 Adding {username} to scoreboard with score {score}");
+
+        GameObject entry = Instantiate(scoreElement, scoreboardContent);
+        entry.GetComponent<ScoreElement>().NewScoreElement(username, score, rank);
+        rank++;
+    }
+
+}
+
+    
+}
